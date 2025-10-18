@@ -1,0 +1,179 @@
+// ==== PONER FULL TEK DOSYA SÜRÜM ====
+// Çalıştırmak için: node server.js
+// Giriş / kayıt / günlük reklam / altın sistemi
+
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
+const path = require("path");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key";
+const COOKIE = "poner_token";
+
+// --- MongoDB Bağlantısı ---
+mongoose
+  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/poner", {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log("✅ MongoDB bağlantısı başarılı"))
+  .catch((e) => console.log("❌ MongoDB hatası:", e));
+
+// --- Kullanıcı Şeması ---
+const userSchema = new mongoose.Schema({
+  email: String,
+  passwordHash: String,
+  gold: { type: Number, default: 0 },
+  adsWatchedToday: { type: Number, default: 0 },
+  lastAdDate: { type: String, default: "" },
+});
+const User = mongoose.model("User", userSchema);
+
+// --- Middleware ---
+app.use(express.json());
+app.use(cookieParser());
+
+// --- Frontend (tek sayfa HTML) ---
+app.get("/", (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PONER Online</title>
+<style>
+  body{font-family:sans-serif;background:#0b0c10;color:#fff;text-align:center;padding:40px}
+  input,button{padding:10px;margin:5px;border-radius:8px;border:none;font-size:16px}
+  button{background:#45a29e;color:#fff;cursor:pointer}
+  button:hover{opacity:0.8}
+  #game{display:none;margin-top:20px}
+  .gold{font-size:22px;margin:15px 0}
+</style>
+</head>
+<body>
+  <h1>💰 PONER ONLINE</h1>
+  <div id="auth">
+    <input id="email" placeholder="E-posta"><br>
+    <input id="password" type="password" placeholder="Şifre"><br>
+    <button onclick="register()">Kayıt Ol</button>
+    <button onclick="login()">Giriş Yap</button>
+  </div>
+  <div id="game">
+    <p id="welcome"></p>
+    <p class="gold">Altın: <span id="gold">0</span></p>
+    <p>Günlük izlenen reklam: <span id="ads">0</span> / 100</p>
+    <button onclick="watchAd()">🎥 Reklam İzle (100 Altın)</button><br>
+    <button onclick="logout()">Çıkış</button>
+  </div>
+<script>
+async function register(){
+  const email=document.getElementById('email').value;
+  const password=document.getElementById('password').value;
+  const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+  const j=await r.json(); alert(j.ok?'Kayıt başarılı':'Hata: '+(j.error||'')); if(j.ok) location.reload();
+}
+async function login(){
+  const email=document.getElementById('email').value;
+  const password=document.getElementById('password').value;
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+  const j=await r.json(); if(j.ok) location.reload(); else alert('Hatalı bilgi');
+}
+async function logout(){await fetch('/api/logout',{method:'POST'});location.reload();}
+async function me(){
+  const r=await fetch('/api/me'); const j=await r.json();
+  if(j.ok){
+    document.getElementById('auth').style.display='none';
+    document.getElementById('game').style.display='block';
+    document.getElementById('welcome').innerText='Hoşgeldin '+j.user.email;
+    document.getElementById('gold').innerText=j.user.gold;
+    document.getElementById('ads').innerText=j.user.adsWatchedToday;
+  }
+}
+async function watchAd(){
+  const r=await fetch('/api/watch-ad',{method:'POST'});
+  const j=await r.json();
+  if(j.ok){
+    document.getElementById('gold').innerText=j.gold;
+    document.getElementById('ads').innerText=j.ads;
+  }else alert(j.error);
+}
+me();
+</script>
+</body>
+</html>
+  `);
+});
+
+// --- API Rotaları ---
+app.post("/api/register", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ error: "E-posta ve şifre gerekli" });
+  const exist = await User.findOne({ email });
+  if (exist) return res.status(400).json({ error: "Bu e-posta kayıtlı" });
+  const hash = await bcrypt.hash(password, 10);
+  const user = new User({ email, passwordHash: hash });
+  await user.save();
+  const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "7d" });
+  res.cookie(COOKIE, token, { httpOnly: true });
+  res.json({ ok: true });
+});
+
+app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) return res.status(400).json({ error: "Kullanıcı yok" });
+  const ok = await bcrypt.compare(password, user.passwordHash);
+  if (!ok) return res.status(400).json({ error: "Hatalı şifre" });
+  const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "7d" });
+  res.cookie(COOKIE, token, { httpOnly: true });
+  res.json({ ok: true });
+});
+
+app.post("/api/logout", (req, res) => {
+  res.clearCookie(COOKIE);
+  res.json({ ok: true });
+});
+
+app.get("/api/me", async (req, res) => {
+  const token = req.cookies[COOKIE];
+  if (!token) return res.json({ ok: false });
+  try {
+    const data = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(data.id);
+    if (!user) return res.json({ ok: false });
+    res.json({ ok: true, user });
+  } catch {
+    res.json({ ok: false });
+  }
+});
+
+app.post("/api/watch-ad", async (req, res) => {
+  const token = req.cookies[COOKIE];
+  if (!token) return res.status(401).json({ error: "Giriş yap" });
+  try {
+    const data = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(data.id);
+    const today = new Date().toISOString().slice(0, 10);
+    if (user.lastAdDate !== today) {
+      user.adsWatchedToday = 0;
+      user.lastAdDate = today;
+    }
+    if (user.adsWatchedToday >= 100)
+      return res.status(400).json({ error: "Günlük 100 reklam limitine ulaşıldı" });
+    user.adsWatchedToday += 1;
+    user.gold += 100;
+    await user.save();
+    res.json({ ok: true, gold: user.gold, ads: user.adsWatchedToday });
+  } catch (e) {
+    res.status(401).json({ error: "Oturum hatası" });
+  }
+});
+
+app.listen(PORT, () => console.log(`🚀 Sunucu çalışıyor: http://localhost:${PORT}`));
